@@ -80,6 +80,227 @@
 */
 
 #include "utils.h"
+#include "stdio.h"
+#include <algorithm>
+
+__global__ void arrprint(unsigned int* arr, int size)
+{
+  for(int i = 0; i < size; i++)
+    printf("%d ", arr[i]);
+  printf("\n\n");
+}
+
+__global__ void shmem_maximum(const float* const d_in, float* const d_out)
+{
+  extern __shared__ float sdata[];
+
+  int myId = threadIdx.x + blockIdx.x * blockDim.x;
+  int tid = threadIdx.x;
+
+  sdata[tid] = d_in[myId];
+  __syncthreads();
+ 
+  for(unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
+  {
+    if(tid < s)
+    {
+      sdata[tid] = fmaxf(sdata[tid + s], sdata[tid]);
+    }
+    __syncthreads();
+  }
+
+  if(tid == 0)
+  {
+    d_out[blockIdx.x] = sdata[0];
+  }
+}
+
+
+__global__ void shmem_minimum(const float* const d_in, float* const d_out)
+{
+  extern __shared__ float sdata[];
+
+  int myId = threadIdx.x + blockIdx.x * blockDim.x;
+  int tid = threadIdx.x;
+
+  sdata[tid] = d_in[myId];
+  __syncthreads();
+
+  for(unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
+  {
+    if(tid < s)
+    {
+      sdata[tid] = fminf(sdata[tid + s], sdata[tid]);
+    }
+    __syncthreads();
+  }
+
+  if(tid == 0)
+  {
+    d_out[blockIdx.x] = sdata[0];
+  }
+}
+
+
+float minimum(const float* const d_in, const size_t size)
+{
+  const int maxThreadPerBlock = 1024;
+  int threads = maxThreadPerBlock;
+  int blocks = size / maxThreadPerBlock;
+
+  // we should not modify the data, so copy an array
+  float *d_tmp = 0;
+  cudaMalloc((void **)&d_tmp, size * sizeof(float));
+  cudaMemcpy(d_tmp, d_in, size * sizeof(float), cudaMemcpyDeviceToDevice);
+
+
+  // create output array
+  float *d_out = 0;
+  cudaMalloc((void **)&d_out, sizeof(float) * threads);
+  cudaMemset(d_out, 0, sizeof(float) * threads);
+
+  shmem_minimum<<<blocks, threads, threads * sizeof(float)>>>(d_tmp, d_out);
+  cudaDeviceSynchronize();
+
+  threads = blocks;
+  blocks  = 1;
+  
+  shmem_minimum<<<blocks, threads, threads * sizeof(float)>>>(d_out, d_tmp);
+  cudaDeviceSynchronize();
+
+  //gets reduction value from d_tmp[0]
+  float reduction_value[] = { 0 };
+  cudaMemcpy(reduction_value, d_tmp, 1 * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_tmp);
+  cudaFree(d_out);
+
+  return reduction_value[0];
+}
+
+float maximum(const float* const d_in, const size_t size)
+{
+  const int maxThreadPerBlock = 1024;
+  int threads = maxThreadPerBlock;
+  int blocks = size / maxThreadPerBlock;
+
+  // we should not modify the data, so copy an array
+  float *d_tmp = 0;
+  cudaMalloc((void **)&d_tmp, size * sizeof(float));
+  cudaMemcpy(d_tmp, d_in, size * sizeof(float), cudaMemcpyDeviceToDevice);
+
+
+  // create output array
+  float *d_out = 0;
+  cudaMalloc((void **)&d_out, sizeof(float) * threads);
+  cudaMemset(d_out, 0, sizeof(float) * threads);
+
+  shmem_maximum<<<blocks, threads, threads * sizeof(float)>>>(d_tmp, d_out);
+
+  threads = blocks;
+  blocks  = 1;
+  
+  shmem_maximum<<<blocks, threads, threads * sizeof(float)>>>(d_out, d_tmp);
+  cudaDeviceSynchronize();
+
+  //gets reduction value from d_tmp[0]
+  float reduction_value[] = { 0 };
+  cudaMemcpy(reduction_value, d_tmp, 1 * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_tmp);
+  cudaFree(d_out);
+
+  return reduction_value[0];
+}
+
+__global__ void histo(const float* const d_in, 
+                      unsigned int* const d_out, 
+                      const size_t size, 
+                      const int numBins, 
+                      const float lumMin, 
+                      const float lumRange)
+{
+  int myId = threadIdx.x + blockIdx.x * blockDim.x;
+  unsigned int bin = umin(static_cast<unsigned int>((d_in[myId] - lumMin) / lumRange * numBins), static_cast<unsigned int>(numBins - 1));
+  atomicAdd(&(d_out[bin]), 1);
+}
+
+unsigned int* histogram(const float* const d_in, const size_t size, const int numBins, const float lumMin, const float lumRange)
+{
+  unsigned int* d_histogram = 0;
+  cudaMalloc((void **)&d_histogram, numBins * sizeof(unsigned int));
+  cudaMemset(d_histogram, static_cast<unsigned int>(0), sizeof(unsigned int) * numBins);
+
+  const int maxThreadPerBlock = 1024;
+  int threads = maxThreadPerBlock;
+  int blocks = size / maxThreadPerBlock;
+
+  histo<<<blocks, threads>>>(d_in, d_histogram, size, numBins, lumMin, lumRange);
+  cudaDeviceSynchronize();
+
+  return d_histogram; 
+}
+
+// Blelloch scan
+__global__ void exclusive_scan(const unsigned int* const d_in, unsigned int* const d_out, const int n)
+{
+  extern __shared__ unsigned int temp[];
+
+  int tid = threadIdx.x;
+  int offset = 1;
+
+  temp[2 * tid] = d_in[2 * tid];
+  temp[2 * tid + 1] = d_in[2 * tid + 1];
+
+  for(unsigned int d = n / 2; d > 0; d >>= 1)
+  {
+    __syncthreads();
+    if(tid < d)
+    {
+      int ai = offset * (2 * tid + 1) - 1;
+      int bi = offset * (2 * tid + 2) - 1;
+
+      temp[bi] += temp[ai];
+    }
+    offset *= 2;
+  }
+
+  if(tid == 0)
+  {
+    temp[n - 1] = 0;
+  }
+
+  for(unsigned int d = 1; d < n; d *= 2)
+  {
+    offset >>= 1;
+    __syncthreads();
+    
+    if(tid < d)
+    {
+      int ai = offset * (2 * tid + 1) - 1;
+      int bi = offset * (2 * tid + 2) - 1;
+      
+      float t = temp[ai];
+      temp[ai] = temp[bi];
+      temp[bi] += t;
+    }
+  }
+
+  __syncthreads();
+
+  d_out[2 * tid] = temp[2 * tid];
+  d_out[2 * tid + 1] = temp[2 * tid + 1];
+}
+
+
+void prefix_sum(const unsigned int* const d_in, unsigned int* const d_out, const int size)
+{
+  int threads = size / 2;
+  int blocks = 1;
+
+  exclusive_scan<<<blocks, threads, 2 * threads * sizeof(unsigned int)>>>(d_in, d_out, size);
+  cudaDeviceSynchronize();
+}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -90,15 +311,27 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numBins)
 {
   //TODO
-  /*Here are the steps you need to implement
-    1) find the minimum and maximum value in the input logLuminance channel
-       store in min_logLum and max_logLum
-    2) subtract them to find the range
-    3) generate a histogram of all the values in the logLuminance channel using
-       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
-    4) Perform an exclusive scan (prefix sum) on the histogram to get
-       the cumulative distribution of luminance values (this should go in the
-       incoming d_cdf pointer which already has been allocated for you)       */
+  //
+  //  Here are the steps you need to implement
+  //  1) find the minimum and maximum value in the input logLuminance channel
+  //     store in min_logLum and max_logLum
 
+  min_logLum = minimum(d_logLuminance, numRows * numCols);
+  max_logLum = maximum(d_logLuminance, numRows * numCols);
 
+  //  2) subtract them to find the range
+
+  float range = max_logLum - min_logLum;
+  
+  //  3) generate a histogram of all the values in the logLuminance channel using
+  //     the formula: bin = (lum[i] - lumMin) / lumRange * numBins
+
+  unsigned int* d_histogram = histogram(d_logLuminance, numCols * numRows, numBins, min_logLum, range);
+  
+  //  4) Perform an exclusive scan (prefix sum) on the histogram to get
+  //     the cumulative distribution of luminance values (this should go in the
+  //     incoming d_cdf pointer which already has been allocated for you)
+  prefix_sum(d_histogram, d_cdf, numBins);     
+
+  cudaFree(d_histogram);
 }

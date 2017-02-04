@@ -41,7 +41,54 @@
    at the end.
 
  */
+#include <stdio.h>
 
+
+__global__ void print(const unsigned int* const d_arr, const size_t size)
+{
+  for(int i = 0; i < size; i++)
+    printf("%d ", d_arr[i]);
+  printf("\n");
+}
+
+__global__ void histogram(const unsigned int* const d_in,
+                          unsigned int* const d_out,
+                          const unsigned int mask, 
+                          const unsigned int i)
+{
+  const int idx = threadIdx.x + blockDim.x * blockIdx.x;
+  const unsigned int bin = (d_in[idx] & mask) >> i;
+  atomicAdd(&(d_out[bin]), 1);
+}
+
+void radix_sort(unsigned int* const d_inputVals,
+                           unsigned int* const d_inputPos,
+                           unsigned int* const d_outputVals,
+                           unsigned int* const d_outputPos,
+                           const size_t numElems)
+{
+  const int numBits = 1;
+  const int numBins = 1 << numBits;
+  
+  unsigned int* d_histogram = 0;
+  cudaMalloc((void **)&d_histogram, numBins * sizeof(unsigned int));
+
+  unsigned int* d_bin_scan = 0;
+  cudaMalloc((void **)&d_histogram, numBins * sizeof(unsigned int));
+
+  for (unsigned int i = 0; i < 8 * sizeof(unsigned int); i += numBits) 
+  {
+      unsigned int mask = (numBins - 1) << i;
+
+      cudaMemset(d_histogram, 0, numBins * sizeof(unsigned int));
+      cudaMemset(d_bin_scan, 0, numBins * sizeof(unsigned int));
+
+      int threads = 1024;
+      int blocks = numElems / threads;
+      // histogram build
+      histogram<<<blocks, threads>>>(d_inputVals, d_histogram, mask, i);
+  }
+}
 
 void your_sort(unsigned int* const d_inputVals,
                unsigned int* const d_inputPos,
@@ -49,6 +96,5 @@ void your_sort(unsigned int* const d_inputVals,
                unsigned int* const d_outputPos,
                const size_t numElems)
 { 
-  //TODO
-  //PUT YOUR SORT HERE
+  print<<<1, 1>>>(d_inputPos, numElems);
 }

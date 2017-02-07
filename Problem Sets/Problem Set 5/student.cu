@@ -28,6 +28,9 @@
 #include "utils.h"
 #include <stdio.h>
 
+#define THREADS_PER_BLOCK 256;
+#define ELEMS_PER_THREAD 8
+
 __global__
 void histogram(const unsigned int* const vals, //INPUT
                unsigned int* const histo,      //OUPUT
@@ -44,8 +47,8 @@ void histogram(const unsigned int* const vals, //INPUT
   subhist[4 * tid + 3] = 0;
   __syncthreads();
 
-  for(int i = 0; i < 8; ++i)
-      atomicAdd(&(subhist[vals[8 * idx + i]]), 1);
+  for(int i = 0; i < ELEMS_PER_THREAD; ++i)
+      atomicAdd(&(subhist[vals[ELEMS_PER_THREAD * idx + i]]), 1);
   __syncthreads();
 
   atomicAdd(&(histo[4 * tid]), subhist[4 * tid]);
@@ -59,8 +62,8 @@ void computeHistogram(const unsigned int* const d_vals, //INPUT
                       const unsigned int numBins,
                       const unsigned int numElems)
 {
-  const unsigned int threads = 256;
-  const unsigned int blocks = numElems / threads / 8;
+  const unsigned int threads = THREADS_PER_BLOCK;
+  const unsigned int blocks = numElems / threads / ELEMS_PER_THREAD;
 
   histogram<<<blocks, threads, numBins * sizeof(unsigned int)>>>(d_vals, d_histo, numElems);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
